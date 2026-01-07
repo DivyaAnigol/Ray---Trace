@@ -1,0 +1,171 @@
+clc; clear; close all;
+
+%% === CHAMBER AND MATERIAL PROPERTIES ===
+H = 500;  % chamber height
+PA12 = struct('name', 'PA12 Powder', 'color', [0.6 0.6 0.6], 'reflectivity', 0.05);
+SS = struct('name', 'Stainless Steel', 'color', [0.8 0.8 0.8], 'reflectivity', 0.85);
+
+corners = [-250 -250 0; 250 -250 0; 250 250 0; -250 250 0; ...
+           -250 -250 H; 250 -250 H; 250 250 H; -250 250 H];
+
+faces = {
+    struct('verts', [1 2 3 4], 'material', PA12);
+    struct('verts', [1 2 6 5], 'material', SS);
+    struct('verts', [2 3 7 6], 'material', SS);
+    struct('verts', [3 4 8 7], 'material', SS);
+    struct('verts', [4 1 5 8], 'material', SS);
+};
+
+figure; hold on; axis equal;
+for i = 1:length(faces)
+    patch('Vertices', corners, 'Faces', faces{i}.verts, ...
+          'FaceColor', faces{i}.material.color, 'FaceAlpha', 0, 'EdgeColor', 'k');
+end
+xlabel('X'); ylabel('Y'); zlabel('Z');
+title('IR Heater Ray Tracing and Temperature Map');
+view(3); grid on;
+
+%% === HEATER DEFINITIONS ===
+heater_lines = [
+    -100, -220, 485,  50, -220, 485;
+     -50, -180, 485, 100, -180, 485;
+     220, -100, 485, 220,  50,  485;
+     180,  -50, 485, 180, 100,  485;
+     100, 220, 485, -50,  220, 485;
+      50, 180, 485, -100, 180, 485;
+    -220, 100, 485, -220, -50,  485;
+    -180,  50, 485, -180, -100, 485;
+];
+
+for i = 1:size(heater_lines, 1)
+    p1 = heater_lines(i,1:3);
+    p2 = heater_lines(i,4:6);
+    plot3([p1(1) p2(1)], [p1(2) p2(2)], [p1(3) p2(3)], 'r', 'LineWidth', 2);
+    mid = (p1 + p2)/2;
+    text(mid(1), mid(2), mid(3)+10, ['H' num2str(i)], 'Color', 'b');
+end
+
+PWM_frac = [1 0.5 1 0.5 1 0.5 1 0.5];
+max_power = 120;
+heater_power = PWM_frac * max_power;
+
+%% === WALLS FOR REFLECTION ===
+walls = {
+    struct('normal', [1 0 0],  'point', [-250 0 0], 'material', SS);
+    struct('normal', [-1 0 0], 'point', [250 0 0],  'material', SS);
+    struct('normal', [0 1 0],  'point', [0 -250 0], 'material', SS);
+    struct('normal', [0 -1 0], 'point', [0 250 0],  'material', SS);
+};
+
+%% === GRID FOR POWDER BED ===
+[xg, yg] = meshgrid(-250:10:250, -250:10:250);
+ray_hits = zeros(size(xg));
+
+%% === RAY TRACING ===
+n_rays = 5000;
+emission_angle = 30;
+max_reflections = 3;
+
+for h = 1:size(heater_lines,1)
+    if PWM_frac(h) == 0, continue; end
+
+    p1 = heater_lines(h,1:3);
+    p2 = heater_lines(h,4:6);
+    starts = [linspace(p1(1),p2(1),n_rays)', ...
+              linspace(p1(2),p2(2),n_rays)', ...
+              linspace(p1(3),p2(3),n_rays)'];
+
+    for i = 1:n_rays
+        origin = starts(i,:);
+        theta = deg2rad(emission_angle) * rand();
+        phi = 2*pi*rand();
+        dir = [sin(theta)*cos(phi), sin(theta)*sin(phi), -cos(theta)];
+
+        curr_origin = origin;
+        curr_dir = dir;
+        reflect_count = 0;
+        alive = true;
+
+        while alive && reflect_count <= max_reflections
+
+            % === BED INTERSECTION ===
+            if curr_dir(3) ~= 0
+                t_bed = -curr_origin(3)/curr_dir(3);
+                if t_bed > 0
+                    pt = curr_origin + t_bed * curr_dir;
+
+                    if abs(pt(1)) <= 250 && abs(pt(2)) <= 250
+                        plot3([curr_origin(1) pt(1)], ...
+                              [curr_origin(2) pt(2)], ...
+                              [curr_origin(3) pt(3)], '-', 'Color', [1 0.2 0.2]);
+
+                        [~, xi] = min(abs(xg(1,:) - pt(1)));
+                        [~, yi] = min(abs(yg(:,1) - pt(2)));
+                        ray_hits(yi, xi) = ray_hits(yi, xi) + 1;
+
+                        break;
+                    end
+                end
+            end
+
+            % === WALL REFLECTION ===
+            hit = false;
+            for w = 1:length(walls)
+                wall = walls{w};
+                denom = dot(curr_dir, wall.normal);
+                if abs(denom) < 1e-6, continue; end
+
+                t = dot(wall.point - curr_origin, wall.normal) / denom;
+                if t <= 0, continue; end
+
+                pt = curr_origin + t * curr_dir;
+                if pt(3) < 0 || pt(3) > H, continue; end
+
+                plot3([curr_origin(1) pt(1)], ...
+                      [curr_origin(2) pt(2)], ...
+                      [curr_origin(3) pt(3)], '-', 'Color', [0.5 0.5 1]);
+
+                curr_origin = pt;
+                curr_dir = curr_dir - 2 * dot(curr_dir, wall.normal) * wall.normal;
+
+                reflect_count = reflect_count + 1;
+                hit = true;
+                break;
+            end
+
+            if ~hit
+                alive = false;
+            end
+        end
+    end
+end
+
+%% === HEAT FLUX COMPUTATION ===
+area_per_cell = (10e-3)^2;
+
+total_energy_J_for_one_sec = sum(heater_power) * 1;
+total_rays = n_rays * sum(PWM_frac > 0);
+energy_per_ray = total_energy_J_for_one_sec / total_rays;
+
+heat_flux = ray_hits * energy_per_ray / area_per_cell;
+
+%% === TEMPERATURE RISE ===
+rho = 1010;
+c = 1700;
+depth = 1e-3;
+mass_per_cell = rho * depth * area_per_cell;
+
+temp_rise = (ray_hits * energy_per_ray) ./ (mass_per_cell * c);
+
+%% === VISUALIZATION ===
+figure;
+surf(xg, yg, heat_flux, 'EdgeColor', 'none');
+title('Heat Flux Distribution on Powder Bed [W/m²]');
+xlabel('X [mm]'); ylabel('Y [mm]'); zlabel('W/m²');
+view(2); axis equal tight; colorbar; colormap hot;
+
+figure;
+surf(xg, yg, temp_rise, 'EdgeColor', 'none');
+title('Temperature Rise After 1 Second [°C]');
+xlabel('X [mm]'); ylabel('Y [mm]'); zlabel('°C');
+view(2); axis equal tight; colorbar; colormap parula;
