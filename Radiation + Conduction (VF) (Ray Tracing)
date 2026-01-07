@@ -1,5 +1,3 @@
-%RT4(111b) Radiation + Conduction (VF) (Ray Tracing)
-
 clc; clear; close all;
 
 % Chamber dimensions
