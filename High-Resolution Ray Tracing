@@ -1,0 +1,215 @@
+clc; clear; close all;
+
+%% --- Chamber Dimensions and Properties ---
+L = -250:250;
+W = -250:250;
+H = 500;
+
+PA12 = struct('name', 'PA12 Powder', ...
+              'color', [0.6 0.6 0.6], ...
+              'reflectivity', 0.05, ...
+              'emissivity', 0.46);
+
+SS = struct('name', 'Polished Stainless Steel', ...
+            'color', [0.8 0.8 0.8], ...
+            'reflectivity', 0.85, ...
+            'emissivity', 0.15);
+
+Ceramic = struct('name', 'Ceramic Coating', ...
+                 'color', [0.7 0.7 0.9], ...
+                 'reflectivity', 0.9, ...
+                 'emissivity', 0.2);
+
+corners = [
+    -250 -250 0;  250 -250 0;  250  250 0; -250  250 0;
+    -250 -250 H;  250 -250 H;  250  250 H; -250  250 H
+];
+
+faces = {
+    struct('verts', [1 2 3 4], 'material', PA12);
+    struct('verts', [1 2 6 5], 'material', SS);
+    struct('verts', [2 3 7 6], 'material', SS);
+    struct('verts', [3 4 8 7], 'material', SS);
+    struct('verts', [4 1 5 8], 'material', SS);
+};
+
+figure; hold on; axis equal;
+xlabel('X'); ylabel('Y'); zlabel('Z');
+title('IR Heater Rays with Reflection — Ray Hit Map');
+view(3); grid on;
+
+for i = 1:length(faces)
+    f = faces{i};
+    patch('Vertices', corners, 'Faces', f.verts, ...
+          'FaceColor', f.material.color, ...
+          'FaceAlpha', 0, 'EdgeColor', 'k');
+end
+
+%% --- Top Pocket Frame ---
+top_strips = {
+    [-250 250 250 -250], [-250 -250 -150 -150];
+    [-250 250 250 -250], [150 150 250 250];
+    [-250 -150 -150 -250], [-250 -250 250 250];
+    [150 250 250 150], [-250 -250 250 250];
+};
+for i = 1:length(top_strips)
+    x = top_strips{i,1};
+    y = top_strips{i,2};
+    patch(x, y, H * ones(1, 4), SS.color, 'FaceAlpha', 0, 'EdgeColor', 'k');
+end
+
+%% --- Heater Geometry ---
+heater_radius = 6; heater_height = H - 15;
+heater_length = 150; offset = 100;
+
+heater_lines = [
+    -offset, -220, heater_height, -offset + heater_length, -220, heater_height;
+     offset - heater_length, -180, heater_height, offset, -180, heater_height;
+     220, -offset, heater_height, 220, -offset + heater_length, heater_height;
+     180, offset - heater_length, heater_height, 180, offset, heater_height;
+     offset, 220, heater_height, offset - heater_length, 220, heater_height;
+    -offset + heater_length, 180, heater_height, -offset, 180, heater_height;
+    -220, offset, heater_height, -220, offset - heater_length, heater_height;
+    -180, -offset + heater_length, heater_height, -180, -offset, heater_height;
+];
+
+n_segments = 40;
+theta = linspace(0, 2*pi, n_segments);
+Xc = heater_radius * cos(theta);
+Yc = heater_radius * sin(theta);
+
+for i = 1:size(heater_lines, 1)
+    p1 = heater_lines(i, 1:3);
+    p2 = heater_lines(i, 4:6);
+    v = p2 - p1; len = norm(v); v = v / len;
+
+    Zc = [zeros(1, n_segments); len * ones(1, n_segments)];
+    Xp = [Xc; Xc]; Yp = [Yc; Yc];
+    z_axis = [0 0 1];
+    axis_rot = cross(z_axis, v);
+    if norm(axis_rot) < 1e-6
+        R = eye(3);
+    else
+        angle = acos(dot(z_axis, v));
+        axis_rot = axis_rot / norm(axis_rot);
+        R = axisAngleRotationMatrix(axis_rot, angle);
+    end
+
+    all_points = [Xp(:), Yp(:), Zc(:)];
+    rotated = (R * all_points')';
+    Xp = reshape(rotated(:,1), 2, []);
+    Yp = reshape(rotated(:,2), 2, []);
+    Zp = reshape(rotated(:,3), 2, []);
+    Xp = Xp + p1(1); Yp = Yp + p1(2); Zp = Zp + p1(3);
+
+    avg_Z = mean(Zp,1);
+    top_idx = avg_Z > mean(avg_Z);
+
+    surf(Xp(:, top_idx), Yp(:, top_idx), Zp(:, top_idx), ...
+         'FaceColor', Ceramic.color, 'EdgeColor', 'none', 'FaceAlpha', 0.99);
+    surf(Xp(:, ~top_idx), Yp(:, ~top_idx), Zp(:, ~top_idx), ...
+         'FaceColor', [1 0 0], 'EdgeColor', 'none', 'FaceAlpha', 0);
+end
+
+%% --- Heater Power (PWM-based) ---
+PWM_frac = [1, 1, 1, 1, 1, 1, 1, 1];
+max_power = 120;
+heater_power = PWM_frac * max_power;
+
+%% --- Ray Hit Map Setup ---
+[xg, yg] = meshgrid(-250:10:250, -250:10:250);
+ray_hit_count = zeros(size(xg));
+cell_size = 10;
+
+%% --- Ray Tracing: Direct + Reflected Rays ---
+n_rays = 10000;
+emission_angle = 30;
+max_reflections = 5;
+wall_z_range = [0, 500];
+
+walls = {
+    struct('normal', [1 0 0], 'point', [-250 0 0], 'material', SS);
+    struct('normal', [-1 0 0], 'point', [250 0 0], 'material', SS);
+    struct('normal', [0 1 0], 'point', [0 -250 0], 'material', SS);
+    struct('normal', [0 -1 0], 'point', [0 250 0], 'material', SS);
+};
+
+for heater_id = 1:size(heater_lines,1)
+    if PWM_frac(heater_id) == 0, continue; end
+
+    p1 = heater_lines(heater_id, 1:3);
+    p2 = heater_lines(heater_id, 4:6);
+    ray_points = [linspace(p1(1), p2(1), n_rays)', ...
+                  linspace(p1(2), p2(2), n_rays)', ...
+                  linspace(p1(3), p2(3), n_rays)'];
+
+    for i = 1:n_rays
+        origin = ray_points(i,:);
+        theta = deg2rad(emission_angle) * rand();
+        phi = 2*pi*rand();
+        dir = [sin(theta)*cos(phi), sin(theta)*sin(phi), -cos(theta)];
+
+        curr_origin = origin;
+        curr_dir = dir;
+        reflect_count = 0;
+
+        while reflect_count <= max_reflections
+            % Intersect with powder bed
+            if curr_dir(3) == 0, break; end
+            t_bed = -curr_origin(3) / curr_dir(3);
+            if t_bed > 0
+                hit = curr_origin + t_bed * curr_dir;
+                if abs(hit(1)) <= 250 && abs(hit(2)) <= 250
+                    plot3([curr_origin(1), hit(1)], ...
+                          [curr_origin(2), hit(2)], ...
+                          [curr_origin(3), hit(3)], ...
+                          '-', 'Color', [1 0 0 0.3], 'LineWidth', 0.5);
+                    ix = round((hit(1) + 250)/cell_size) + 1;
+                    iy = round((hit(2) + 250)/cell_size) + 1;
+                    if ix >= 1 && ix <= size(ray_hit_count,2) && ...
+                       iy >= 1 && iy <= size(ray_hit_count,1)
+                        ray_hit_count(iy, ix) = ray_hit_count(iy, ix) + 1;
+                    end
+                    break;
+                end
+            end
+
+            % Intersect walls
+            hit = false;
+            for w = 1:length(walls)
+                wall = walls{w};
+                denom = dot(curr_dir, wall.normal);
+                if abs(denom) < 1e-6, continue; end
+                t = dot(wall.point - curr_origin, wall.normal) / denom;
+                if t <= 0, continue; end
+                pt = curr_origin + t * curr_dir;
+                if pt(3) < wall_z_range(1) || pt(3) > wall_z_range(2), continue; end
+                plot3([curr_origin(1), pt(1)], ...
+                      [curr_origin(2), pt(2)], ...
+                      [curr_origin(3), pt(3)], ...
+                      '-', 'Color', [0.3 0.3 1 0.3], 'LineWidth', 0.5);
+                curr_origin = pt;
+                curr_dir = curr_dir - 2 * dot(curr_dir, wall.normal) * wall.normal;
+                reflect_count = reflect_count + 1;
+                hit = true;
+                break;
+            end
+            if ~hit, break; end
+        end
+    end
+end
+
+%% --- Plot Final Ray Hit Map ---
+ray_hit_norm = ray_hit_count / max(ray_hit_count(:));
+figure;
+surf(xg, yg, zeros(size(ray_hit_count)), ray_hit_count, 'EdgeColor', 'none');
+view(2); axis equal tight;
+colormap hot; colorbar;
+title('Actual Ray Hit Count on Powder Bed');
+xlabel('X [mm]'); ylabel('Y [mm]');
+
+%% --- Rotation Helper ---
+function R = axisAngleRotationMatrix(axis, angle)
+    K = [0 -axis(3) axis(2); axis(3) 0 -axis(1); -axis(2) axis(1) 0];
+    R = eye(3) + sin(angle)*K + (1 - cos(angle))*(K*K);
+end
